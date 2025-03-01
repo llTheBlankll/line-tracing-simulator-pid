@@ -15,6 +15,12 @@ import tkinter as tk
 from tkinter import ttk
 from pygame.locals import *  # Import pygame constants to fix linter errors
 
+# Fix linter errors by explicitly importing pygame constants
+from pygame.locals import (
+    QUIT, KEYDOWN, MOUSEBUTTONDOWN, MOUSEBUTTONUP, MOUSEMOTION,
+    K_ESCAPE, K_SPACE, K_r
+)
+
 # Constants - initial values that will be adjustable via sliders
 BASE_SPEED = 40
 KP = 1.0
@@ -43,21 +49,20 @@ WINDOW_HEIGHT = SCREEN_HEIGHT + STATS_HEIGHT
 SCALE = 2
 
 # Performance settings
-HISTORY_SIZE = 200  # Reduced from 500 to improve performance
+HISTORY_SIZE = 100  # Reduced from 500 to improve performance
 PLOT_UPDATE_INTERVAL = 5  # Update plots more frequently
 PHYSICS_SUBSTEPS = 2  # Number of physics updates per frame for smoother simulation
 FPS_UPDATE_INTERVAL = 10  # Update FPS display every N frames
-
 
 class Robot:
     def __init__(self, x, y, theta=0):
         self.x = x
         self.y = y
         self.theta = theta  # in radians
-        self.width = 10
-        self.length = 15
-        self.sensor_width = 8  # Distance between left and right sensors
-        self.sensor_distance = 5  # Distance of sensors from front of robot
+        self.width = 20
+        self.length = 14
+        self.sensor_width = 10  # Distance between left and right sensors
+        self.sensor_distance = 2  # Distance of sensors from front of robot
 
         # PID variables
         self.error = 1  # 0-LEFT, 1-FORWARD, 2-RIGHT
@@ -69,6 +74,10 @@ class Robot:
         self.target_right_speed = BASE_SPEED
         self.current_left_speed = 0
         self.current_right_speed = 0
+        
+        # Physics parameters (default to global values)
+        self.friction = FRICTION
+        self.inertia = INERTIA
 
         # State
         self.is_stopped = False
@@ -159,15 +168,15 @@ class Robot:
     def update_physics(self, dt):
         # Apply inertia to motor speeds (smooth acceleration/deceleration)
         self.current_left_speed = (
-            1 - INERTIA
-        ) * self.current_left_speed + INERTIA * self.target_left_speed
+            1 - self.inertia
+        ) * self.current_left_speed + self.inertia * self.target_left_speed
         self.current_right_speed = (
-            1 - INERTIA
-        ) * self.current_right_speed + INERTIA * self.target_right_speed
+            1 - self.inertia
+        ) * self.current_right_speed + self.inertia * self.target_right_speed
 
         # Apply friction
-        self.current_left_speed *= FRICTION
-        self.current_right_speed *= FRICTION
+        self.current_left_speed *= self.friction
+        self.current_right_speed *= self.friction
 
     def move(self, dt):
         # Update physics first
@@ -195,6 +204,15 @@ class Robot:
         self.history_y.append(self.y)
 
     def reset(self, x, y, theta):
+        # Remember current parameters
+        width = self.width
+        length = self.length
+        sensor_width = self.sensor_width
+        sensor_distance = self.sensor_distance
+        friction = self.friction
+        inertia = self.inertia
+        
+        # Reset position and motion
         self.x = x
         self.y = y
         self.theta = theta
@@ -206,6 +224,16 @@ class Robot:
         self.current_left_speed = 0
         self.current_right_speed = 0
         self.is_stopped = False
+        
+        # Restore parameters
+        self.width = width
+        self.length = length
+        self.sensor_width = sensor_width
+        self.sensor_distance = sensor_distance
+        self.friction = friction
+        self.inertia = inertia
+        
+        # Clear history
         self.history_x.clear()
         self.history_y.clear()
         self.history_x.append(x)
@@ -487,28 +515,31 @@ def is_out_of_bounds(x, y):
     )
 
 
-def draw_track(screen, track_x, track_y, scale=1.0):
+def draw_track(screen, track_x, track_y, scale=1.0, thickness=6):
     """
     Draw the track with improved visibility.
     Uses a thicker line and anti-aliasing effect for better appearance.
-    """
-    # Draw a thicker black line first
-    track_thickness = 6  # Increased thickness
     
+    Args:
+        screen: Pygame surface to draw on
+        track_x, track_y: Track coordinates
+        scale: Scale factor for drawing
+        thickness: Thickness of the track line
+    """
     # Convert track points to screen coordinates
     points = [(int(track_x[i] * scale), int(track_y[i] * scale)) 
               for i in range(0, len(track_x), 2)]  # Use every 2nd point for performance
     
     if len(points) > 1:
         # Draw a white border around the track for better visibility
-        border_thickness = track_thickness + 4
+        border_thickness = thickness + 4
         pygame.draw.lines(screen, WHITE, False, points, border_thickness)
         
         # Draw the main track line (thicker)
-        pygame.draw.lines(screen, BLACK, False, points, track_thickness)
+        pygame.draw.lines(screen, BLACK, False, points, thickness)
         
         # Draw a thinner gray line in the center for a more professional look
-        center_thickness = 2
+        center_thickness = max(1, thickness // 3)
         pygame.draw.lines(screen, (80, 80, 80), False, points, center_thickness)
 
 
@@ -612,36 +643,20 @@ class MatplotlibWindow:
         self.fig.tight_layout()
         self.is_closed = False
         
-        # Force an initial update of the window
-        self.root.update()
-
-        # Start the update thread
-        self.update_thread = threading.Thread(target=self.update_thread_function)
-        self.update_thread.daemon = True
-        self.update_thread.start()
-
-    def update_thread_function(self):
-        """Thread function to update plots without blocking the main thread"""
-        while not self.is_closed:
-            try:
-                # Check if there's new data in the queue
-                if not self.data_queue.empty():
-                    robot_data = self.data_queue.get(block=False)
-                    self.update_plots(robot_data)
-
-                # Process Tkinter events
-                self.root.update()
-
-                # Sleep to reduce CPU usage
-                time.sleep(0.05)
-            except tk.TclError:
-                # Window was likely closed
-                self.is_closed = True
-                break
-            except Exception as e:
-                if not self.is_closed:
-                    print(f"Error in update thread: {e}")
-                    time.sleep(0.1)
+        # We don't schedule updates here - that will be done externally
+        
+    def check_queue(self):
+        """Check for new data and update plots if needed"""
+        if self.is_closed:
+            return
+            
+        try:
+            # Process any data in the queue
+            while not self.data_queue.empty():
+                robot_data = self.data_queue.get(block=False)
+                self.update_plots(robot_data)
+        except Exception as e:
+            print(f"Error in check_queue: {e}")
 
     def update_plots(self, robot_data):
         if self.is_closed:
@@ -697,7 +712,7 @@ class MatplotlibWindow:
 
             # Update the figure
             self.fig.tight_layout()
-            self.canvas.draw()
+            self.canvas.draw_idle()
         except Exception as e:
             print(f"Error updating plots: {e}")
 
@@ -707,6 +722,12 @@ class MatplotlibWindow:
             self.root.destroy()
         except:
             pass
+    
+    def update(self):
+        """Update the Tkinter window and process events"""
+        if not self.is_closed:
+            self.check_queue()
+            self.root.update()
 
 
 def main():
@@ -734,24 +755,30 @@ def main():
     button_rect = pygame.Rect(SCREEN_WIDTH - 150, SCREEN_HEIGHT + 10, 140, 40)
 
     # Create PID sliders
-    kp_slider = PIDSlider(50, SCREEN_HEIGHT + 50, 200, 20, 0, 50, KP, "Kp")
-    ki_slider = PIDSlider(50, SCREEN_HEIGHT + 100, 200, 20, 0, 10, KI, "Ki")
-    kd_slider = PIDSlider(50, SCREEN_HEIGHT + 150, 200, 20, 0, 0.1, KD, "Kd")
+    kp_slider = PIDSlider(50, SCREEN_HEIGHT + 50, 200, 20, 0, 20, KP, "Kp")
+    ki_slider = PIDSlider(50, SCREEN_HEIGHT + 100, 200, 20, 0, 0.1, KI, "Ki")
+    kd_slider = PIDSlider(50, SCREEN_HEIGHT + 150, 200, 20, 0, 20, KD, "Kd")
     speed_slider = PIDSlider(
         350, SCREEN_HEIGHT + 50, 200, 20, 10, 100, BASE_SPEED, "Base Speed"
     )
+    
+    # Create physics and robot parameter sliders
+    friction_slider = PIDSlider(350, SCREEN_HEIGHT + 100, 200, 20, 0.1, 1.0, robot.friction, "Friction")
+    inertia_slider = PIDSlider(350, SCREEN_HEIGHT + 150, 200, 20, 0.1, 1.0, robot.inertia, "Inertia")
+    sensor_width_slider = PIDSlider(600, SCREEN_HEIGHT + 50, 200, 20, 4, 16, robot.sensor_width, "Sensor Width")
+    sensor_dist_slider = PIDSlider(600, SCREEN_HEIGHT + 100, 200, 20, 2, 10, robot.sensor_distance, "Sensor Distance")
+    robot_width_slider = PIDSlider(600, SCREEN_HEIGHT + 150, 200, 20, 5, 20, robot.width, "Robot Width")
+    robot_length_slider = PIDSlider(850, SCREEN_HEIGHT + 50, 200, 20, 5, 30, robot.length, "Robot Length")
+    track_thickness_slider = PIDSlider(850, SCREEN_HEIGHT + 100, 200, 20, 2, 10, 6, "Track Thickness")
 
     # Time step
     dt = 0.1 / PHYSICS_SUBSTEPS  # Smaller time step for more accurate physics
 
     # Create a queue for thread communication
-    data_queue = queue.Queue(maxsize=10)
+    data_queue = queue.Queue(maxsize=20)  # Increased queue size for better data flow
 
-    # Create Matplotlib window in a separate thread
+    # Create Matplotlib window
     matplotlib_window = MatplotlibWindow(data_queue)
-    
-    # Give the matplotlib window time to initialize
-    time.sleep(0.5)
 
     # Main game loop
     running = True
@@ -762,10 +789,21 @@ def main():
     fps = 0
     
     # Reduce plot update interval for more frequent updates
-    PLOT_UPDATE_INTERVAL = 5  # Update plots more frequently
+    plot_update_interval = 3  # Update plots more frequently
+    current_track_thickness = 6  # Default track thickness
+    
+    # Current physics parameters
+    current_friction = FRICTION
+    current_inertia = INERTIA
 
     try:
-        while running and not matplotlib_window.is_closed:
+        while running:
+            # Update the Matplotlib window first
+            if matplotlib_window.is_closed:
+                running = False
+            else:
+                matplotlib_window.update()
+            
             # Handle events
             for event in pygame.event.get():
                 if event.type == QUIT:
@@ -804,6 +842,24 @@ def main():
                 ki_slider.handle_event(event)
                 kd_slider.handle_event(event)
                 speed_slider.handle_event(event)
+                
+                # Handle new slider events
+                friction_slider.handle_event(event)
+                inertia_slider.handle_event(event)
+                sensor_width_slider.handle_event(event)
+                sensor_dist_slider.handle_event(event)
+                robot_width_slider.handle_event(event)
+                robot_length_slider.handle_event(event)
+                track_thickness_slider.handle_event(event)
+                
+                # Update parameters from sliders
+                robot.sensor_width = sensor_width_slider.value
+                robot.sensor_distance = sensor_dist_slider.value
+                robot.width = robot_width_slider.value
+                robot.length = robot_length_slider.value
+                current_track_thickness = int(track_thickness_slider.value)
+                current_friction = friction_slider.value
+                current_inertia = inertia_slider.value
 
             if not paused:
                 # Get sensor positions
@@ -822,6 +878,10 @@ def main():
                     kd_slider.value,
                     speed_slider.value,
                 )
+                
+                # Store current physics parameters for the robot to use
+                robot.friction = current_friction
+                robot.inertia = current_inertia
 
                 # Multiple physics updates per frame for smoother simulation
                 for _ in range(PHYSICS_SUBSTEPS):
@@ -841,8 +901,8 @@ def main():
             # Clear the screen
             screen.fill(WHITE)
 
-            # Draw the track
-            draw_track(screen, track_x, track_y, SCALE)
+            # Draw the track with current thickness
+            draw_track(screen, track_x, track_y, SCALE, current_track_thickness)
 
             # Draw the robot
             robot.draw(screen, SCALE)
@@ -857,6 +917,15 @@ def main():
             ki_slider.draw(screen, font)
             kd_slider.draw(screen, font)
             speed_slider.draw(screen, font)
+            
+            # Draw new sliders
+            friction_slider.draw(screen, font)
+            inertia_slider.draw(screen, font)
+            sensor_width_slider.draw(screen, font)
+            sensor_dist_slider.draw(screen, font)
+            robot_width_slider.draw(screen, font)
+            robot_length_slider.draw(screen, font)
+            track_thickness_slider.draw(screen, font)
 
             # Draw restart button
             pygame.draw.rect(screen, GRAY, button_rect)
@@ -887,14 +956,14 @@ def main():
 
             # Draw FPS
             fps_text = font.render(f"FPS: {fps:.1f}", True, BLACK)
-            screen.blit(fps_text, (SCREEN_WIDTH - 100, SCREEN_HEIGHT + 50))
+            screen.blit(fps_text, (SCREEN_WIDTH - 100, SCREEN_HEIGHT + 150))
 
             # Update the display
             pygame.display.flip()
 
             # Update matplotlib window at a reduced frequency
             frame_count += 1
-            if frame_count % PLOT_UPDATE_INTERVAL == 0:
+            if frame_count % plot_update_interval == 0:
                 # Only update if the queue isn't full (non-blocking)
                 try:
                     if not data_queue.full():
@@ -913,7 +982,7 @@ def main():
         # Make sure Tkinter is properly closed
         try:
             if not matplotlib_window.is_closed:
-                matplotlib_window.root.destroy()
+                matplotlib_window.on_closing()
         except:
             pass
 
