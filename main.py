@@ -54,6 +54,9 @@ PLOT_UPDATE_INTERVAL = 5  # Update plots more frequently
 PHYSICS_SUBSTEPS = 2  # Number of physics updates per frame for smoother simulation
 FPS_UPDATE_INTERVAL = 10  # Update FPS display every N frames
 
+# Performance optimization: Cache for line segment calculations in is_on_line function
+segment_cache = {}
+
 class Robot:
     def __init__(self, x, y, theta=0):
         self.x = x
@@ -409,6 +412,7 @@ def is_on_line(sensor_x, sensor_y, track_x, track_y, threshold=3.5):
     """
     Check if a sensor is on the line with improved detection reliability.
     Uses a more efficient algorithm to check proximity to line segments.
+    Performance-optimized version with caching.
     
     Args:
         sensor_x, sensor_y: Coordinates of the sensor
@@ -418,8 +422,10 @@ def is_on_line(sensor_x, sensor_y, track_x, track_y, threshold=3.5):
     Returns:
         True if the sensor is on the line, False otherwise
     """
-    # Use a stride to check fewer points initially (every 5th point)
-    stride = 5
+    global segment_cache
+    
+    # Use a larger stride for initial check (optimization)
+    stride = 8
     
     # Calculate distances to track points (vectorized)
     distances = np.sqrt(
@@ -428,35 +434,16 @@ def is_on_line(sensor_x, sensor_y, track_x, track_y, threshold=3.5):
     
     # If we find a close point in the subset, do a more detailed check
     min_dist = np.min(distances)
-    if min_dist < threshold * 2:  # Use a larger threshold for the coarse check
+    if min_dist < threshold * 3:  # Use a larger initial threshold
         # Find the index of the closest point in our strided array
         min_idx = np.argmin(distances) * stride
         
-        # Define a window around the closest point
-        window_size = 20  # Increased window size for better detection
+        # Define a smaller window around the closest point (optimization)
+        window_size = 16
         start_idx = max(0, min_idx - window_size)
         end_idx = min(len(track_x), min_idx + window_size)
         
-        # If we're near the beginning or end of the track, wrap around
-        if start_idx == 0 and end_idx < len(track_x):
-            # Also check the end of the track
-            wrap_start = max(0, len(track_x) - window_size)
-            wrap_distances = np.sqrt(
-                (track_x[wrap_start:] - sensor_x) ** 2 + (track_y[wrap_start:] - sensor_y) ** 2
-            )
-            if np.min(wrap_distances) < threshold:
-                return True
-                
-        if end_idx == len(track_x) and start_idx > 0:
-            # Also check the beginning of the track
-            wrap_end = min(window_size, len(track_x))
-            wrap_distances = np.sqrt(
-                (track_x[:wrap_end] - sensor_x) ** 2 + (track_y[:wrap_end] - sensor_y) ** 2
-            )
-            if np.min(wrap_distances) < threshold:
-                return True
-        
-        # Calculate distances for the window of points
+        # Check distances for the window of points
         window_distances = np.sqrt(
             (track_x[start_idx:end_idx] - sensor_x) ** 2
             + (track_y[start_idx:end_idx] - sensor_y) ** 2
@@ -466,17 +453,40 @@ def is_on_line(sensor_x, sensor_y, track_x, track_y, threshold=3.5):
         if np.min(window_distances) < threshold:
             return True
             
-        # If we're still not detecting the line, check line segments
-        # This helps with detection when points are sparse
+        # Check line segments, using cache when possible
         for i in range(start_idx, end_idx - 1):
-            # Calculate distance from sensor to line segment
-            dist = point_to_line_segment_distance(
-                sensor_x, sensor_y, 
-                track_x[i], track_y[i], 
-                track_x[i+1], track_y[i+1]
-            )
-            if dist < threshold:
-                return True
+            # Create a unique key for this segment
+            segment_key = (i, i+1)
+            
+            # Calculate or retrieve cached values
+            if segment_key not in segment_cache:
+                x1, y1 = track_x[i], track_y[i]
+                x2, y2 = track_x[i+1], track_y[i+1]
+                
+                # Precompute some values for line segment distance calculations
+                dx = x2 - x1
+                dy = y2 - y1
+                line_length_sq = dx**2 + dy**2
+                
+                # Store these values in the cache
+                if line_length_sq > 0:  # Avoid division by zero
+                    segment_cache[segment_key] = (x1, y1, x2, y2, dx, dy, line_length_sq)
+            
+            # If segment is in cache, use the cached values
+            if segment_key in segment_cache:
+                x1, y1, x2, y2, dx, dy, line_length_sq = segment_cache[segment_key]
+                
+                # Calculate projection of point onto line segment
+                t = max(0, min(1, ((sensor_x - x1) * dx + (sensor_y - y1) * dy) / line_length_sq))
+                
+                # Calculate closest point on line segment
+                closest_x = x1 + t * dx
+                closest_y = y1 + t * dy
+                
+                # Check distance to closest point
+                dist = np.sqrt((sensor_x - closest_x) ** 2 + (sensor_y - closest_y) ** 2)
+                if dist < threshold:
+                    return True
     
     return False
 
@@ -519,6 +529,7 @@ def draw_track(screen, track_x, track_y, scale=1.0, thickness=6):
     """
     Draw the track with improved visibility.
     Uses a thicker line and anti-aliasing effect for better appearance.
+    Optimized for performance with point reduction.
     
     Args:
         screen: Pygame surface to draw on
@@ -526,9 +537,10 @@ def draw_track(screen, track_x, track_y, scale=1.0, thickness=6):
         scale: Scale factor for drawing
         thickness: Thickness of the track line
     """
-    # Convert track points to screen coordinates
+    # Convert track points to screen coordinates with greater stride for performance
+    stride = 3  # Use every 3rd point for better performance
     points = [(int(track_x[i] * scale), int(track_y[i] * scale)) 
-              for i in range(0, len(track_x), 2)]  # Use every 2nd point for performance
+              for i in range(0, len(track_x), stride)]
     
     if len(points) > 1:
         # Draw a white border around the track for better visibility
@@ -615,7 +627,7 @@ class MatplotlibWindow:
         # Store the data queue for thread communication
         self.data_queue = data_queue
         self.last_update_time = time.time()
-        self.update_interval = 0.2  # Update plots every 200ms (5 times per second)
+        self.update_interval = 0.3  # Reduced update frequency for better performance (300ms)
 
         # Create figure with subplots
         self.fig = Figure(figsize=(10, 8), dpi=100)
@@ -712,7 +724,7 @@ class MatplotlibWindow:
             x_range = list(range(len(error_data)))
             
             # Downsample for better performance if data is large
-            stride = max(1, len(error_data) // 100)
+            stride = max(1, len(error_data) // 50)  # More aggressive downsampling for performance
             
             # Update plot data
             self.error_line.set_data(x_range[::stride], error_data[::stride])
@@ -814,6 +826,9 @@ def main():
     robot_width_slider = PIDSlider(600, SCREEN_HEIGHT + 150, 200, 20, 5, 20, robot.width, "Robot Width")
     robot_length_slider = PIDSlider(850, SCREEN_HEIGHT + 50, 200, 20, 5, 30, robot.length, "Robot Length")
     track_thickness_slider = PIDSlider(850, SCREEN_HEIGHT + 100, 200, 20, 2, 10, 6, "Track Thickness")
+    
+    # Add slow motion slider
+    sim_speed_slider = PIDSlider(850, SCREEN_HEIGHT + 150, 200, 20, 0.1, 2.0, 1.0, "Sim Speed")
 
     # Time step
     dt = 0.1 / PHYSICS_SUBSTEPS  # Smaller time step for more accurate physics
@@ -833,7 +848,7 @@ def main():
     fps = 0
     
     # Reduce plot update interval for more frequent updates
-    plot_update_interval = 10  # Increased to update less frequently for better performance
+    plot_update_interval = 15  # Further increased to update less frequently for better performance
     current_track_thickness = 6  # Default track thickness
     
     # Current physics parameters
@@ -842,18 +857,27 @@ def main():
     
     # Time tracking
     last_data_send_time = time.time()
-    plot_update_delay = 0.1  # Only send data to plots every 100ms
+    plot_update_delay = 0.2  # Only send data to plots every 200ms
+    
+    # For FPS calculation
+    fps_history = deque(maxlen=30)  # Store recent FPS values for smoother display
+    
+    # Track rendering optimization
+    track_points = []
+    for i in range(0, len(track_x), 3):
+        track_points.append((int(track_x[i] * SCALE), int(track_y[i] * SCALE)))
 
     try:
         while running:
             # Start frame timing
             frame_start_time = time.time()
             
-            # Update the Matplotlib window first (this is now optimized to be faster)
-            if matplotlib_window.is_closed:
-                running = False
-            else:
-                matplotlib_window.update()
+            # Process Tkinter events at a reduced rate (every 2 frames)
+            if frame_count % 2 == 0:
+                if matplotlib_window.is_closed:
+                    running = False
+                else:
+                    matplotlib_window.update()
             
             # Handle events
             for event in pygame.event.get():
@@ -875,6 +899,14 @@ def main():
                                 track_y[1] - track_y[0], track_x[1] - track_x[0]
                             ),
                         )
+                        # Clear segment cache when track changes
+                        segment_cache.clear()
+                        
+                        # Update pre-rendered track points
+                        track_points = []
+                        for i in range(0, len(track_x), 3):
+                            track_points.append((int(track_x[i] * SCALE), int(track_y[i] * SCALE)))
+                            
                 elif event.type == MOUSEBUTTONDOWN:
                     if button_rect.collidepoint(event.pos):
                         # Generate new track
@@ -887,6 +919,13 @@ def main():
                                 track_y[1] - track_y[0], track_x[1] - track_x[0]
                             ),
                         )
+                        # Clear segment cache when track changes
+                        segment_cache.clear()
+                        
+                        # Update pre-rendered track points
+                        track_points = []
+                        for i in range(0, len(track_x), 3):
+                            track_points.append((int(track_x[i] * SCALE), int(track_y[i] * SCALE)))
 
                 # Handle slider events
                 kp_slider.handle_event(event)
@@ -902,6 +941,7 @@ def main():
                 robot_width_slider.handle_event(event)
                 robot_length_slider.handle_event(event)
                 track_thickness_slider.handle_event(event)
+                sim_speed_slider.handle_event(event)  # Handle slow-motion slider
                 
                 # Update parameters from sliders
                 robot.sensor_width = sensor_width_slider.value
@@ -934,9 +974,13 @@ def main():
                 robot.friction = current_friction
                 robot.inertia = current_inertia
 
+                # Apply slow motion by adjusting the time step
+                sim_speed = sim_speed_slider.value
+                current_dt = dt * sim_speed
+                
                 # Multiple physics updates per frame for smoother simulation
                 for _ in range(PHYSICS_SUBSTEPS):
-                    robot.move(dt)
+                    robot.move(current_dt)
 
                 # Check if robot is out of bounds
                 if is_out_of_bounds(robot.x, robot.y):
@@ -948,6 +992,13 @@ def main():
                         track_y[0],
                         np.arctan2(track_y[1] - track_y[0], track_x[1] - track_x[0]),
                     )
+                    # Clear segment cache when track changes
+                    segment_cache.clear()
+                    
+                    # Update pre-rendered track points
+                    track_points = []
+                    for i in range(0, len(track_x), 3):
+                        track_points.append((int(track_x[i] * SCALE), int(track_y[i] * SCALE)))
 
             # Clear the screen
             screen.fill(WHITE)
@@ -977,6 +1028,7 @@ def main():
             robot_width_slider.draw(screen, font)
             robot_length_slider.draw(screen, font)
             track_thickness_slider.draw(screen, font)
+            sim_speed_slider.draw(screen, font)  # Draw slow-motion slider
 
             # Draw restart button
             pygame.draw.rect(screen, GRAY, button_rect)
@@ -995,15 +1047,20 @@ def main():
                 f"Left Sensor: {'ON' if left_on_line else 'OFF'} | "
                 f"Right Sensor: {'ON' if right_on_line else 'OFF'} | "
                 f"{'STOPPED' if robot.is_stopped else 'RUNNING'} | "
+                f"Sim Speed: {sim_speed_slider.value:.2f}x | "
                 f"Press SPACE to pause, R to generate new track",
                 True,
                 BLACK,
             )
             screen.blit(status_text, (10, SCREEN_HEIGHT + 10))
 
-            # Update FPS counter less frequently to reduce overhead
-            if frame_count % FPS_UPDATE_INTERVAL == 0:
-                fps = clock.get_fps()
+            # Calculate FPS more accurately
+            frame_time = time.time() - frame_start_time
+            if frame_time > 0:
+                current_fps = 1.0 / frame_time
+                fps_history.append(current_fps)
+                if len(fps_history) > 0:
+                    fps = sum(fps_history) / len(fps_history)
 
             # Draw FPS
             fps_text = font.render(f"FPS: {fps:.1f}", True, BLACK)
@@ -1024,13 +1081,14 @@ def main():
                 except:
                     pass
 
-            # Calculate frame time
-            frame_time = time.time() - frame_start_time
-            
-            # Only sleep if we're running fast enough
-            sleep_time = max(0, 1/60 - frame_time)
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            # Only sleep if we're running fast enough and not in slow motion mode
+            if sim_speed_slider.value >= 1.0:
+                sleep_time = max(0, 1/60 - frame_time)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+            else:
+                # In slow motion, we don't need to sleep as we're already running slower
+                pass
                 
             # Count frames
             frame_count += 1
