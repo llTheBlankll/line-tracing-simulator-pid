@@ -1,6 +1,6 @@
 """
-Entry point for the line following robot simulation.
-This file imports and runs the main function from our modular codebase.
+Launcher script for the line following robot simulation.
+This file runs the main function from the src.main module.
 """
 import os
 import sys
@@ -17,4 +17,4 @@ except ImportError as e:
     print("Make sure you have installed all required packages:")
     print("pip install -r requirements.txt")
 except Exception as e:
-    print(f"Error running simulation: {e}")
+    print(f"Error running simulation: {e}") 
