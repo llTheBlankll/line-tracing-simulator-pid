@@ -614,6 +614,8 @@ class MatplotlibWindow:
 
         # Store the data queue for thread communication
         self.data_queue = data_queue
+        self.last_update_time = time.time()
+        self.update_interval = 0.2  # Update plots every 200ms (5 times per second)
 
         # Create figure with subplots
         self.fig = Figure(figsize=(10, 8), dpi=100)
@@ -628,13 +630,34 @@ class MatplotlibWindow:
         self.ax5 = self.fig.add_subplot(325)  # Position X
         self.ax6 = self.fig.add_subplot(326)  # Position Y
 
-        # Set titles
+        # Set up plot lines for faster updating
+        x_dummy = [0]
+        y_dummy = [0]
+        
+        # Set titles and initialize plot lines
         self.ax1.set_title("Error")
+        self.error_line, = self.ax1.plot(x_dummy, y_dummy, "r-")
+        self.ax1.set_ylim(-1.5, 1.5)
+        
         self.ax2.set_title("Motor Speeds")
+        self.left_speed_line, = self.ax2.plot(x_dummy, y_dummy, "b-", label="Left")
+        self.right_speed_line, = self.ax2.plot(x_dummy, y_dummy, "g-", label="Right")
+        self.ax2.legend()
+        
         self.ax3.set_title("PID Components")
+        self.proportional_line, = self.ax3.plot(x_dummy, y_dummy, "r-", label="P")
+        self.integral_line, = self.ax3.plot(x_dummy, y_dummy, "g-", label="I")
+        self.derivative_line, = self.ax3.plot(x_dummy, y_dummy, "b-", label="D")
+        self.ax3.legend()
+        
         self.ax4.set_title("Motor Speed Difference")
+        self.motor_diff_line, = self.ax4.plot(x_dummy, y_dummy, "g-")
+        
         self.ax5.set_title("Position X")
+        self.pos_x_line, = self.ax5.plot(x_dummy, y_dummy, "k-")
+        
         self.ax6.set_title("Position Y")
+        self.pos_y_line, = self.ax6.plot(x_dummy, y_dummy, "k-")
 
         # Set grid
         for ax in [self.ax1, self.ax2, self.ax3, self.ax4, self.ax5, self.ax6]:
@@ -643,75 +666,87 @@ class MatplotlibWindow:
         self.fig.tight_layout()
         self.is_closed = False
         
-        # We don't schedule updates here - that will be done externally
+        # Initialize with empty data
+        self.current_data = {
+            "error_history": [0],
+            "motor_diff_history": [0],
+            "left_speed_history": [0],
+            "right_speed_history": [0],
+            "proportional_history": [0],
+            "integral_history": [0],
+            "derivative_history": [0],
+            "history_x": [0],
+            "history_y": [0],
+        }
         
     def check_queue(self):
-        """Check for new data and update plots if needed"""
+        """Check for new data and update current data"""
         if self.is_closed:
             return
             
         try:
-            # Process any data in the queue
+            # Process any data in the queue (only get the latest)
+            latest_data = None
             while not self.data_queue.empty():
-                robot_data = self.data_queue.get(block=False)
-                self.update_plots(robot_data)
+                latest_data = self.data_queue.get(block=False)
+                
+            # If we got new data, store it
+            if latest_data:
+                self.current_data = latest_data
         except Exception as e:
             print(f"Error in check_queue: {e}")
 
-    def update_plots(self, robot_data):
+    def update_plots(self):
         if self.is_closed:
             return
 
         try:
-            # Clear all axes
-            for ax in [self.ax1, self.ax2, self.ax3, self.ax4, self.ax5, self.ax6]:
-                ax.clear()
-                ax.grid(True)
-
-            # Get data
-            error_data = robot_data["error_history"]
-            motor_diff_data = robot_data["motor_diff_history"]
-            left_speed = robot_data["left_speed_history"]
-            right_speed = robot_data["right_speed_history"]
-            proportional = robot_data["proportional_history"]
-            integral = robot_data["integral_history"]
-            derivative = robot_data["derivative_history"]
-            x_range = range(len(error_data))
-
-            # Plot error
-            self.ax1.plot(x_range, error_data, "r-")
-            self.ax1.set_title("Error")
+            # Get current data
+            error_data = self.current_data["error_history"]
+            motor_diff_data = self.current_data["motor_diff_history"]
+            left_speed = self.current_data["left_speed_history"]
+            right_speed = self.current_data["right_speed_history"]
+            proportional = self.current_data["proportional_history"]
+            integral = self.current_data["integral_history"]
+            derivative = self.current_data["derivative_history"]
+            x_range = list(range(len(error_data)))
+            
+            # Downsample for better performance if data is large
+            stride = max(1, len(error_data) // 100)
+            
+            # Update plot data
+            self.error_line.set_data(x_range[::stride], error_data[::stride])
+            self.motor_diff_line.set_data(x_range[::stride], motor_diff_data[::stride])
+            self.left_speed_line.set_data(x_range[::stride], left_speed[::stride])
+            self.right_speed_line.set_data(x_range[::stride], right_speed[::stride])
+            self.proportional_line.set_data(x_range[::stride], proportional[::stride])
+            self.integral_line.set_data(x_range[::stride], integral[::stride])
+            self.derivative_line.set_data(x_range[::stride], derivative[::stride])
+            
+            # Update position plots if data exists
+            if len(self.current_data.get("history_x", [])) > 0:
+                x_data = self.current_data["history_x"]
+                x_indices = list(range(len(x_data)))
+                self.pos_x_line.set_data(x_indices[::stride], x_data[::stride])
+                self.ax5.relim()
+                self.ax5.autoscale_view()
+                
+            if len(self.current_data.get("history_y", [])) > 0:
+                y_data = self.current_data["history_y"]
+                y_indices = list(range(len(y_data)))
+                self.pos_y_line.set_data(y_indices[::stride], y_data[::stride])
+                self.ax6.relim()
+                self.ax6.autoscale_view()
+            
+            # Update axis limits for other plots
+            for ax in [self.ax1, self.ax2, self.ax3, self.ax4]:
+                ax.relim()
+                ax.autoscale_view()
+                
+            # Keep the y-limits fixed for the error plot
             self.ax1.set_ylim(-1.5, 1.5)
 
-            # Plot motor speeds
-            self.ax2.plot(x_range, left_speed, "b-", label="Left")
-            self.ax2.plot(x_range, right_speed, "g-", label="Right")
-            self.ax2.set_title("Motor Speeds")
-            self.ax2.legend()
-
-            # Plot PID components
-            self.ax3.plot(x_range, proportional, "r-", label="P")
-            self.ax3.plot(x_range, integral, "g-", label="I")
-            self.ax3.plot(x_range, derivative, "b-", label="D")
-            self.ax3.set_title("PID Components")
-            self.ax3.legend()
-
-            # Plot motor difference
-            self.ax4.plot(x_range, motor_diff_data, "g-")
-            self.ax4.set_title("Motor Speed Difference")
-
-            # Plot position X
-            if len(robot_data.get("history_x", [])) > 0:
-                self.ax5.plot(robot_data["history_x"], "k-")
-                self.ax5.set_title("Position X")
-
-            # Plot position Y
-            if len(robot_data.get("history_y", [])) > 0:
-                self.ax6.plot(robot_data["history_y"], "k-")
-                self.ax6.set_title("Position Y")
-
-            # Update the figure
-            self.fig.tight_layout()
+            # Draw the updates
             self.canvas.draw_idle()
         except Exception as e:
             print(f"Error updating plots: {e}")
@@ -726,8 +761,17 @@ class MatplotlibWindow:
     def update(self):
         """Update the Tkinter window and process events"""
         if not self.is_closed:
-            self.check_queue()
+            # Always process Tkinter events
             self.root.update()
+            
+            # Always check the queue for new data
+            self.check_queue()
+            
+            # Only update plots periodically for better performance
+            current_time = time.time()
+            if current_time - self.last_update_time >= self.update_interval:
+                self.update_plots()
+                self.last_update_time = current_time
 
 
 def main():
@@ -789,16 +833,23 @@ def main():
     fps = 0
     
     # Reduce plot update interval for more frequent updates
-    plot_update_interval = 3  # Update plots more frequently
+    plot_update_interval = 10  # Increased to update less frequently for better performance
     current_track_thickness = 6  # Default track thickness
     
     # Current physics parameters
     current_friction = FRICTION
     current_inertia = INERTIA
+    
+    # Time tracking
+    last_data_send_time = time.time()
+    plot_update_delay = 0.1  # Only send data to plots every 100ms
 
     try:
         while running:
-            # Update the Matplotlib window first
+            # Start frame timing
+            frame_start_time = time.time()
+            
+            # Update the Matplotlib window first (this is now optimized to be faster)
             if matplotlib_window.is_closed:
                 running = False
             else:
@@ -961,19 +1012,28 @@ def main():
             # Update the display
             pygame.display.flip()
 
-            # Update matplotlib window at a reduced frequency
-            frame_count += 1
-            if frame_count % plot_update_interval == 0:
-                # Only update if the queue isn't full (non-blocking)
+            # Send data to matplotlib window at a controlled rate
+            # This is a major optimization to avoid slowing down the main loop
+            current_time = time.time()
+            if current_time - last_data_send_time >= plot_update_delay:
                 try:
                     if not data_queue.full():
                         robot_data = robot.get_data_for_plotting()
                         data_queue.put(robot_data, block=False)
+                        last_data_send_time = current_time
                 except:
                     pass
 
-            # Cap the frame rate
-            clock.tick(60)
+            # Calculate frame time
+            frame_time = time.time() - frame_start_time
+            
+            # Only sleep if we're running fast enough
+            sleep_time = max(0, 1/60 - frame_time)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+                
+            # Count frames
+            frame_count += 1
 
     finally:
         # Quit pygame
